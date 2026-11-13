@@ -1,204 +1,141 @@
-\---
-
-
-
-\# 🚀 PostAi (Nome Provisório)
-
-
+# 🚀 PostAi (Nome Provisório)
 
 Plataforma centralizada para orquestração e publicação de conteúdo simultaneamente no Instagram, Facebook e TikTok. Foco em agilidade: envie uma vez, a plataforma distribui e mantém apenas o status da sua última postagem.
 
+## 🛠️ 1. Stack Tecnológica
 
+- **Front-end:** Next.js (React) com Tailwind CSS.
 
-\## 🛠️ 1. Stack Tecnológica
+- **Back-end:** NestJS (TypeScript).
 
+- **ORM:** Prisma (Proteção nativa contra SQL Injection).
 
+- **Mensageria:** Redis com BullMQ.
 
-\* \*\*Front-end:\*\* Next.js (React) com Tailwind CSS.
+- **Banco de Dados:** PostgreSQL (Docker local) / Supabase (Produção).
 
-\* \*\*Back-end:\*\* NestJS (TypeScript).
-
-\* \*\*ORM:\*\* Prisma (Proteção nativa contra SQL Injection).
-
-\* \*\*Mensageria:\*\* Redis com BullMQ.
-
-\* \*\*Banco de Dados:\*\* PostgreSQL (Docker local) / Supabase (Produção).
-
-
-
-\## 🛡️ 2. Requisitos de Segurança \& Autenticação
-
-
+## 🛡️ 2. Requisitos de Segurança & Autenticação
 
 O sistema implementa uma camada de segurança rigorosa baseada em práticas de mercado:
 
+- **Login/Cadastro:** E-mail e senha emitindo JWT. Senhas cacheadas com `bcrypt`.
 
+- **Social Login:** Google OAuth2 (Google Identity Services) com validação de ID token no back-end.
 
-\* \*\*Login/Cadastro:\*\* E-mail e senha emitindo JWT. Senhas cacheadas com `bcrypt`.
+- **Refresh Token com Rotação:** Uso único, guardado como hash (SHA-256) com busca indexada no banco.
 
-\* \*\*Social Login:\*\* Google OAuth2 (Google Identity Services) com validação de ID token no back-end.
+- **Recuperação de Senha:** Link de uso único por e-mail, expiração em 15 minutos, token via `bcrypt`.
 
-\* \*\*Refresh Token com Rotação:\*\* Uso único, guardado como hash (SHA-256) com busca indexada no banco.
+- **Prevenção a Ataques:**
 
-\* \*\*Recuperação de Senha:\*\* Link de uso único por e-mail, expiração em 15 minutos, token via `bcrypt`.
+- **XSS:** Sanitização rigorosa de inputs (ex: `sanitize-html`) no registro e login social.
 
-\* \*\*Prevenção a Ataques:\*\*
+- **Força Bruta:** Rate limiting por IP real (5 tentativas/minuto) nas rotas `/login` e `/forgot-password`, configurado para `trust proxy`.
 
-\* \*\*XSS:\*\* Sanitização rigorosa de inputs (ex: `sanitize-html`) no registro e login social.
+- **Enumeração:** Respostas genéricas em rotas de recuperação de senha.
 
-\* \*\*Força Bruta:\*\* Rate limiting por IP real (5 tentativas/minuto) nas rotas `/login` e `/forgot-password`, configurado para `trust proxy`.
+- **CORS:** Restrito à variável de ambiente `FRONTEND_URL`.
 
-\* \*\*Enumeração:\*\* Respostas genéricas em rotas de recuperação de senha.
+- **Segredos:** 100% gerenciados por variáveis de ambiente.
 
-\* \*\*CORS:\*\* Restrito à variável de ambiente `FRONTEND\_URL`.
+## 🎯 3. Requisitos Funcionais (MVP)
 
+- **RF01:** Autenticação completa (Interna e Google) do usuário na plataforma.
 
+- **RF02:** Vinculação via OAuth2 de contas do Facebook, Instagram (Profissional) e TikTok, com renovação automática de tokens.
 
+- **RF03:** Upload de mídia (identificando formato MIME para bloqueio de redes incompatíveis) e inclusão de legenda unificada.
 
+- **RF04:** Envio do conteúdo em background via filas (Redis/BullMQ).
 
-\* \*\*Segredos:\*\* 100% gerenciados por variáveis de ambiente.
+- **RF05:** O sistema armazena e exibe **apenas o status da última postagem** enviada (substituindo ou deletando registros anteriores para economizar storage).
 
+## 🚏 4. Mapeamento de Rotas (API REST)
 
+**Domínio: Autenticação (Segurança Máxima)**
 
-\## 🎯 3. Requisitos Funcionais (MVP)
+- `POST /auth/register` - Cria conta (com sanitização XSS).
 
+- `POST /auth/login` - Retorna JWT (Rate limited).
 
+- `POST /auth/refresh` - Rotação do refresh token.
 
-\* \*\*RF01:\*\* Autenticação completa (Interna e Google) do usuário na plataforma.
+- `POST /auth/google` - Valida o ID Token do Google.
 
-\* \*\*RF02:\*\* Vinculação via OAuth2 de contas do Facebook, Instagram (Profissional) e TikTok, com renovação automática de tokens.
+- `POST /auth/forgot-password` - Dispara e-mail genérico (Rate limited).
 
-\* \*\*RF03:\*\* Upload de mídia (identificando formato MIME para bloqueio de redes incompatíveis) e inclusão de legenda unificada.
+- `POST /auth/reset-password` - Valida token `bcrypt` de 15 min e altera senha.
 
-\* \*\*RF04:\*\* Envio do conteúdo em background via filas (Redis/BullMQ).
+**Domínio: Conexões Sociais (OAuth2)**
 
-\* \*\*RF05:\*\* O sistema armazena e exibe \*\*apenas o status da última postagem\*\* enviada (substituindo ou deletando registros anteriores para economizar storage).
+- `GET /connections` - Lista redes vinculadas.
 
+- `GET /oauth/:provider/callback` - Salva tokens da rede social.
 
+**Domínio: Postagem (Única)**
 
-\## 🚏 4. Mapeamento de Rotas (API REST)
+- `POST /posts` - Salva o arquivo temporariamente, agenda o disparo no BullMQ e apaga do banco a postagem anterior do usuário.
 
+- `GET /posts/latest` - Retorna apenas a última publicação tentada e o log de status em cada rede (Pendente, Sucesso, Falha).
 
+## 🗄️ 5. Modelagem do Banco de Dados
 
-\*\*Domínio: Autenticação (Segurança Máxima)\*\*
+**Tabela: `users**`
 
+- `id` (UUID, PK)
 
+- `name` (Varchar, sanitizado)
 
-\* `POST /auth/register` - Cria conta (com sanitização XSS).
+- `email` (Varchar, Unique)
 
-\* `POST /auth/login` - Retorna JWT (Rate limited).
+- `password_hash` (Varchar, Nullable para quem usa só Google)
 
-\* `POST /auth/refresh` - Rotação do refresh token.
+- `google_id` (Varchar, Nullable, Unique)
 
-\* `POST /auth/google` - Valida o ID Token do Google.
+- `plan` (Enum: 'FREE', 'PRO') - com valor padrão 'FREE'.
 
-\* `POST /auth/forgot-password` - Dispara e-mail genérico (Rate limited).
+**Tabelas de Segurança Auth:**
 
-\* `POST /auth/reset-password` - Valida token `bcrypt` de 15 min e altera senha.
+- `refresh_tokens` (id, user_id, hashed_token, expires_at, is_revoked)
 
+- `password_resets` (id, user_id, hashed_token, expires_at)
 
+**Tabela: `oauth_connections**`
 
-\*\*Domínio: Conexões Sociais (OAuth2)\*\*
+- `id` (UUID, PK)
 
+- `user_id` (UUID, FK)
 
+- `provider` ('facebook', 'instagram', 'tiktok')
 
-\* `GET /connections` - Lista redes vinculadas.
+- `external_account_id` (Varchar)
 
-\* `GET /oauth/:provider/callback` - Salva tokens da rede social.
+- `access_token` (Text)
 
+- `refresh_token` (Text)
 
+- `expires_at` (Timestamp)
 
-\*\*Domínio: Postagem (Única)\*\*
+**Tabela: `latest_post**` (Substitui a tabela de histórico)
 
+- `id` (UUID, PK)
 
+- `user_id` (UUID, FK, Unique) - _Garante que exista apenas 1 post por usuário no banco._
 
-\* `POST /posts` - Salva o arquivo temporariamente, agenda o disparo no BullMQ e apaga do banco a postagem anterior do usuário.
+- `content_text` (Text)
 
-\* `GET /posts/latest` - Retorna apenas a última publicação tentada e o log de status em cada rede (Pendente, Sucesso, Falha).
+- `media_url` (Varchar)
 
+**Tabela: `latest_post_deliveries**`
 
+- `id` (UUID, PK)
 
-\## 🗄️ 5. Modelagem do Banco de Dados
+- `latest_post_id` (UUID, FK)
 
+- `provider` ('facebook', 'instagram', 'tiktok')
 
+- `status` ('pending', 'processing', 'success', 'failed')
 
-\*\*Tabela: `users\*\*`
+- `error_message` (Text)
 
-
-
-\* `id` (UUID, PK)
-
-\* `name` (Varchar, sanitizado)
-
-\* `email` (Varchar, Unique)
-
-\* `password\_hash` (Varchar, Nullable para quem usa só Google)
-
-\* `google\_id` (Varchar, Nullable, Unique)
-
-\* `plan` (Enum: 'FREE', 'PRO') - com valor padrão 'FREE'.
-
-
-
-\*\*Tabelas de Segurança Auth:\*\*
-
-
-
-\* `refresh\_tokens` (id, user\_id, hashed\_token, expires\_at, is\_revoked)
-
-\* `password\_resets` (id, user\_id, hashed\_token, expires\_at)
-
-
-
-\*\*Tabela: `oauth\_connections\*\*`
-
-
-
-\* `id` (UUID, PK)
-
-\* `user\_id` (UUID, FK)
-
-\* `provider` ('facebook', 'instagram', 'tiktok')
-
-\* `external\_account\_id` (Varchar)
-
-\* `access\_token` (Text)
-
-\* `refresh\_token` (Text)
-
-\* `expires\_at` (Timestamp)
-
-
-
-\*\*Tabela: `latest\_post\*\*` (Substitui a tabela de histórico)
-
-
-
-\* `id` (UUID, PK)
-
-\* `user\_id` (UUID, FK, Unique) - \*Garante que exista apenas 1 post por usuário no banco.\*
-
-\* `content\_text` (Text)
-
-\* `media\_url` (Varchar)
-
-
-
-\*\*Tabela: `latest\_post\_deliveries\*\*`
-
-
-
-\* `id` (UUID, PK)
-
-\* `latest\_post\_id` (UUID, FK)
-
-\* `provider` ('facebook', 'instagram', 'tiktok')
-
-\* `status` ('pending', 'processing', 'success', 'failed')
-
-\* `error\_message` (Text)
-
-
-
-\---
-
+---
