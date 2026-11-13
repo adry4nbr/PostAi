@@ -1,6 +1,6 @@
 # 🚀 PostAi (Nome Provisório)
 
-Plataforma centralizada para orquestração e publicação de conteúdo simultaneamente no Instagram, Facebook e TikTok. Foco em agilidade: envie uma vez, a plataforma distribui e mantém apenas o status da sua última postagem.
+Plataforma centralizada para orquestração e publicação de conteúdo simultaneamente no Instagram, Facebook, TikTok e YouTube(Por hora). Foco em agilidade: envie uma vez, a plataforma distribui e mantém apenas o status da sua última postagem.
 
 ## 🛠️ 1. Stack Tecnológica
 
