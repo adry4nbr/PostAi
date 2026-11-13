@@ -1,0 +1,28 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: postai_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: root
+      POSTGRES_DB: postaidb
+    ports:
+      - "5433:5432"
+    volumes:
+      - postai_pg_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: postai_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - postai_redis_data:/data
+
+volumes:
+  postai_pg_data:
+  postai_redis_data:
