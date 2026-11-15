@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { ValidationPipe } from '@nestjs/common';
 import { NestExpressApplication } from '@nestjs/platform-express';
+import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
@@ -10,6 +11,8 @@ async function bootstrap() {
 
   // IP real atrás de proxy (necessário para o rate limit)
   app.set('trust proxy', 1);
+
+  app.use(cookieParser());
 
   app.enableCors({
     origin: config.getOrThrow<string>('FRONTEND_URL'),
