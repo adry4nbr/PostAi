@@ -1,4 +1,10 @@
-import { IsEmail, IsString, Length } from 'class-validator';
+import {
+  IsByteLength,
+  IsEmail,
+  IsString,
+  Length,
+  MinLength,
+} from 'class-validator';
 import { Transform } from 'class-transformer';
 
 export class RegisterDto {
@@ -13,6 +19,10 @@ export class RegisterDto {
   email!: string;
 
   @IsString({ message: 'A senha deve ser uma string' })
-  @Length(8, 72, { message: 'A senha deve ter entre 8 e 72 caracteres' })
+  @MinLength(8, { message: 'A senha deve ter no mínimo 8 caracteres' })
+  @IsByteLength(1, 72, {
+    message:
+      'A senha é muito longa. Use uma senha menor (acentos e emojis contam mais).',
+  })
   password!: string;
 }

@@ -1,6 +1,5 @@
 import {
   BadRequestException,
-  ConflictException,
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -22,10 +21,9 @@ export interface LoginResponse {
   accessToken: string;
 }
 
-// Hash bcrypt de custo 12 pré-computado para comparação em tempo constante
+// Hash bcrypt de custo 12 gerado na inicialização para comparação em tempo constante
 // quando o usuário não existe ou não possui senha (ex: conta criada via Google).
-const DUMMY_BCRYPT_HASH =
-  '$2b$12$Bu.1wvKmmIyPV4y/sKmjyeYLt9frf60tS9LY4HYnszYEnNr600Pwe';
+const DUMMY_BCRYPT_HASH = bcrypt.hashSync('dummy-password', 12);
 
 @Injectable()
 export class AuthService {
@@ -41,11 +39,17 @@ export class AuthService {
     const sanitizedName = sanitizeHtml(dto.name.trim(), {
       allowedTags: [],
       allowedAttributes: {},
-    }).trim();
+    })
+      .replace(/&amp;/g, '&')
+      .trim();
 
     if (sanitizedName.length < 2 || sanitizedName.length > 80) {
       throw new BadRequestException('O nome deve ter entre 2 e 80 caracteres');
     }
+
+    // Hash de senha com bcrypt cost factor 12 executado antes da checagem
+    // para equalizar a latência e mitigar enumeração de contas via timing attack.
+    const passwordHash = await bcrypt.hash(dto.password, 12);
 
     const existingUser = await this.prisma.user.findUnique({
       where: { email: normalizedEmail },
@@ -53,11 +57,8 @@ export class AuthService {
     });
 
     if (existingUser) {
-      throw new ConflictException('Email já cadastrado');
+      throw new BadRequestException('Não foi possível concluir o cadastro');
     }
-
-    // Hash de senha utilizando bcrypt com cost factor 12
-    const passwordHash = await bcrypt.hash(dto.password, 12);
 
     try {
       const user = await this.prisma.user.create({
@@ -79,7 +80,7 @@ export class AuthService {
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002'
       ) {
-        throw new ConflictException('Email já cadastrado');
+        throw new BadRequestException('Não foi possível concluir o cadastro');
       }
       throw error;
     }
