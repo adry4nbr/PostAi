@@ -10,10 +10,17 @@ import {
 } from '@nestjs/common';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
-import { AuthService, LoginResponse, RegisterResponse } from './auth.service';
+import {
+  AuthService,
+  LoginResponse,
+  MessageResponse,
+  RegisterResponse,
+} from './auth.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { GoogleLoginDto } from './dto/google-login.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 
 @Controller('auth')
 export class AuthController {
@@ -68,5 +75,23 @@ export class AuthController {
     @Res({ passthrough: true }) res: Response,
   ): Promise<LoginResponse> {
     return this.authService.googleLogin(dto, res);
+  }
+
+  @Post('forgot-password')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async forgotPassword(
+    @Body() dto: ForgotPasswordDto,
+  ): Promise<MessageResponse> {
+    return this.authService.forgotPassword(dto);
+  }
+
+  @Post('reset-password')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async resetPassword(@Body() dto: ResetPasswordDto): Promise<MessageResponse> {
+    return this.authService.resetPassword(dto);
   }
 }

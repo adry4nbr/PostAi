@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -12,9 +13,12 @@ import type { CookieOptions, Response } from 'express';
 import { OAuth2Client, type TokenPayload } from 'google-auth-library';
 import sanitizeHtml from 'sanitize-html';
 import { PrismaService } from '../prisma/prisma.service';
+import { MailService } from '../mail/mail.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { GoogleLoginDto } from './dto/google-login.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 
 export interface RegisterResponse {
   id: string;
@@ -26,18 +30,29 @@ export interface LoginResponse {
   accessToken: string;
 }
 
+export interface MessageResponse {
+  message: string;
+}
+
 // Hash bcrypt de custo 12 gerado na inicialização para comparação em tempo constante
 // quando o usuário não existe ou não possui senha (ex: conta criada via Google).
 const DUMMY_BCRYPT_HASH = bcrypt.hashSync('dummy-password', 12);
 
+// Mensagem estática de resposta para forgot-password — nunca varia, seja o e-mail
+// existente ou não, para prevenir enumeração de contas (AGENTS.md §4.6).
+const FORGOT_PASSWORD_RESPONSE =
+  'Se o e-mail estiver cadastrado, você receberá as instruções.';
+
 @Injectable()
 export class AuthService {
   private readonly googleClient: OAuth2Client;
+  private readonly logger = new Logger(AuthService.name);
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
+    private readonly mailService: MailService,
   ) {
     this.googleClient = new OAuth2Client(
       this.configService.get<string>('GOOGLE_CLIENT_ID'),
@@ -302,6 +317,105 @@ export class AuthService {
     });
 
     return this.issueSessionTokens(newUser.id, res);
+  }
+
+  async forgotPassword(dto: ForgotPasswordDto): Promise<MessageResponse> {
+    const normalizedEmail = dto.email.trim().toLowerCase();
+
+    const user = await this.prisma.user.findUnique({
+      where: { email: normalizedEmail },
+      select: { id: true },
+    });
+
+    if (!user) {
+      // Executa bcrypt.hash descartável para igualar o custo e prevenir timing attack,
+      // pois a resposta deve ser idêntica seja o e-mail existente ou não (§4.6).
+      await bcrypt.hash('dummy-secret', 12);
+      return { message: FORGOT_PASSWORD_RESPONSE };
+    }
+
+    // Remover tokens anteriores para garantir link de uso único.
+    await this.prisma.passwordReset.deleteMany({
+      where: { userId: user.id },
+    });
+
+    // secret = token aleatório que será enviado por e-mail.
+    // Apenas o hash bcrypt é persistido — o secret nunca vai ao banco.
+    const secret = crypto.randomBytes(32).toString('base64url');
+    const hashedToken = await bcrypt.hash(secret, 12);
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutos
+
+    const reset = await this.prisma.passwordReset.create({
+      data: {
+        userId: user.id,
+        hashedToken,
+        expiresAt,
+      },
+      select: { id: true },
+    });
+
+    // Formato composto: id do registro + secret separados por ponto.
+    // O id permite busca eficiente; o secret é validado via bcrypt.compare.
+    const token = `${reset.id}.${secret}`;
+    const frontendUrl = this.configService.get<string>('FRONTEND_URL', '');
+    const resetUrl = `${frontendUrl}/reset-password?token=${token}`;
+
+    // Fire-and-forget: nunca bloqueia a resposta nem loga token/link.
+    this.mailService
+      .sendPasswordReset(normalizedEmail, resetUrl)
+      .catch(() => this.logger.error('Falha ao enviar e-mail de recuperação'));
+
+    return { message: FORGOT_PASSWORD_RESPONSE };
+  }
+
+  async resetPassword(dto: ResetPasswordDto): Promise<MessageResponse> {
+    // Separar id e secret pelo primeiro ponto — formato: "uuid.base64url"
+    const dotIndex = dto.token.indexOf('.');
+    if (dotIndex === -1) {
+      throw new BadRequestException('Link inválido ou expirado');
+    }
+
+    const id = dto.token.slice(0, dotIndex);
+    const secret = dto.token.slice(dotIndex + 1);
+
+    if (!id || !secret) {
+      throw new BadRequestException('Link inválido ou expirado');
+    }
+
+    const resetRecord = await this.prisma.passwordReset.findUnique({
+      where: { id },
+    });
+
+    // Não achou ou expirado — erro genérico para não revelar detalhes.
+    if (!resetRecord || resetRecord.expiresAt < new Date()) {
+      throw new BadRequestException('Link inválido ou expirado');
+    }
+
+    // Valida o secret contra o hash bcrypt salvo no banco.
+    const isSecretValid = await bcrypt.compare(secret, resetRecord.hashedToken);
+    if (!isSecretValid) {
+      throw new BadRequestException('Link inválido ou expirado');
+    }
+
+    const newPasswordHash = await bcrypt.hash(dto.newPassword, 12);
+
+    // $transaction garante atomicidade: senha nova, remoção de todos os resets
+    // e revogação de todos os refresh tokens do usuário.
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: resetRecord.userId },
+        data: { passwordHash: newPasswordHash },
+      }),
+      this.prisma.passwordReset.deleteMany({
+        where: { userId: resetRecord.userId },
+      }),
+      this.prisma.refreshToken.updateMany({
+        where: { userId: resetRecord.userId },
+        data: { isRevoked: true },
+      }),
+    ]);
+
+    return { message: 'Senha alterada com sucesso.' };
   }
 
   private async issueSessionTokens(

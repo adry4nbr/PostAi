@@ -5,6 +5,7 @@ import type { SignOptions } from 'jsonwebtoken';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { MailModule } from '../mail/mail.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { JwtAuthGuard } from './guards/jwt-auth.guard';
         },
       }),
     }),
+    MailModule,
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtAuthGuard],
