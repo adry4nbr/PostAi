@@ -5,8 +5,17 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import type { Response } from 'express';
+import { beforeEach, describe, expect, it, jest } from '@jest/globals';
 import { AuthService, RegisterResponse } from './auth.service';
 import { PrismaService } from '../prisma/prisma.service';
+
+const mockVerifyIdToken = jest.fn();
+
+jest.mock('google-auth-library', () => ({
+  OAuth2Client: jest.fn().mockImplementation(() => ({
+    verifyIdToken: mockVerifyIdToken,
+  })),
+}));
 
 jest.mock('bcrypt', () => ({
   hashSync: jest.fn().mockReturnValue('mocked_dummy_bcrypt_hash'),
@@ -48,6 +57,7 @@ jest.mock('../prisma/prisma.service', () => ({
     user: {
       findUnique: jest.fn(),
       create: jest.fn(),
+      update: jest.fn(),
     },
     refreshToken: {
       findUnique: jest.fn(),
@@ -64,6 +74,7 @@ const mockedBcrypt = jest.mocked(bcrypt);
 type MockPrismaUser = {
   findUnique: jest.Mock;
   create: jest.Mock;
+  update: jest.Mock;
 };
 
 type MockPrismaRefreshToken = {
@@ -114,6 +125,7 @@ describe('AuthService', () => {
       user: {
         findUnique: jest.fn(),
         create: jest.fn(),
+        update: jest.fn(),
       },
       refreshToken: {
         findUnique: jest.fn(),
@@ -139,6 +151,7 @@ describe('AuthService', () => {
         .mockImplementation((key: string, defaultValue?: string) => {
           if (key === 'REFRESH_TOKEN_TTL_DAYS') return '30';
           if (key === 'NODE_ENV') return 'test';
+          if (key === 'GOOGLE_CLIENT_ID') return 'mock-google-client-id';
           return defaultValue;
         }),
     };
@@ -657,6 +670,254 @@ describe('AuthService', () => {
       // Retorna apenas { accessToken }
       expect(result).toEqual({ accessToken: 'novo_jwt_access_token' });
       expect(result).not.toHaveProperty('refreshToken');
+    });
+  });
+
+  describe('logout', () => {
+    it('deve realizar logout com cookie, revogar o token no banco e limpar o cookie', async () => {
+      const { res, mockRes } = createMockResponse();
+      prismaMock.refreshToken.updateMany.mockResolvedValue({ count: 1 });
+
+      const rawToken = 'cookie_refresh_token_logout';
+      const expectedHash =
+        'e987422844fdaad2a4b8e1ad419076b9c14130ab6b2d660380f69a8376ca6e3d';
+
+      await service.logout(rawToken, res);
+
+      expect(prismaMock.refreshToken.updateMany).toHaveBeenCalledWith({
+        where: {
+          hashedToken: expectedHash,
+          isRevoked: false,
+        },
+        data: { isRevoked: true },
+      });
+
+      expect(mockRes.clearCookie).toHaveBeenCalledWith('refresh_token', {
+        httpOnly: true,
+        secure: false,
+        sameSite: 'lax',
+        path: '/auth',
+      });
+    });
+
+    it('deve realizar logout sem cookie, não consultar banco e limpar o cookie mesmo assim', async () => {
+      const { res, mockRes } = createMockResponse();
+
+      await service.logout(undefined, res);
+
+      expect(prismaMock.refreshToken.updateMany).not.toHaveBeenCalled();
+      expect(mockRes.clearCookie).toHaveBeenCalledWith('refresh_token', {
+        httpOnly: true,
+        secure: false,
+        sameSite: 'lax',
+        path: '/auth',
+      });
+    });
+  });
+
+  describe('googleLogin', () => {
+    it('deve lançar UnauthorizedException("Credenciais inválidas") quando o idToken for inválido', async () => {
+      const { res } = createMockResponse();
+      mockVerifyIdToken.mockRejectedValue(new Error('Invalid token'));
+
+      await expect(
+        service.googleLogin({ idToken: 'invalid_token' }, res),
+      ).rejects.toThrow(new UnauthorizedException('Credenciais inválidas'));
+
+      expect(prismaMock.user.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('deve lançar UnauthorizedException("Credenciais inválidas") quando email_verified for false', async () => {
+      const { res } = createMockResponse();
+      mockVerifyIdToken.mockResolvedValue({
+        getPayload: () => ({
+          sub: 'google-sub-unverified',
+          email: 'unverified@example.com',
+          email_verified: false,
+        }),
+      });
+
+      await expect(
+        service.googleLogin({ idToken: 'unverified_token' }, res),
+      ).rejects.toThrow(new UnauthorizedException('Credenciais inválidas'));
+
+      expect(prismaMock.user.findUnique).not.toHaveBeenCalled();
+    });
+
+    it('deve autenticar usuário existente por googleId sem alterar senha nem chamar transação', async () => {
+      const { res, mockRes } = createMockResponse();
+      mockVerifyIdToken.mockResolvedValue({
+        getPayload: () => ({
+          sub: 'google-sub-existing',
+          email: 'existing.google@example.com',
+          email_verified: true,
+          name: 'Existing Google User',
+        }),
+      });
+
+      prismaMock.user.findUnique.mockResolvedValueOnce({
+        id: 'user-google-existing-id',
+      });
+      prismaMock.refreshToken.create.mockResolvedValue({ id: 'rt-id' });
+      jwtServiceMock.signAsync.mockResolvedValue('jwt_google_existing_token');
+
+      const result = await service.googleLogin(
+        { idToken: 'valid_google_token' },
+        res,
+      );
+
+      expect(prismaMock.user.findUnique).toHaveBeenCalledWith({
+        where: { googleId: 'google-sub-existing' },
+        select: { id: true },
+      });
+      expect(prismaMock.user.update).not.toHaveBeenCalled();
+      expect(prismaMock.user.create).not.toHaveBeenCalled();
+      expect(prismaMock.$transaction).not.toHaveBeenCalled();
+
+      expect(mockRes.cookie).toHaveBeenCalledWith(
+        'refresh_token',
+        'mocked_raw_refresh_token_base64url',
+        expect.objectContaining({
+          httpOnly: true,
+          path: '/auth',
+        }),
+      );
+
+      expect(jwtServiceMock.signAsync).toHaveBeenCalledWith({
+        sub: 'user-google-existing-id',
+      });
+      expect(result).toEqual({ accessToken: 'jwt_google_existing_token' });
+    });
+
+    it('deve vincular por email quando não achar por googleId, zerando senha e revogando tokens em transação', async () => {
+      const { res, mockRes } = createMockResponse();
+      mockVerifyIdToken.mockResolvedValue({
+        getPayload: () => ({
+          sub: 'google-sub-link',
+          email: '  Link.Account@Example.COM  ',
+          email_verified: true,
+          name: 'Link User',
+        }),
+      });
+
+      // 1st lookup by googleId -> null
+      prismaMock.user.findUnique.mockResolvedValueOnce(null);
+      // 2nd lookup by email -> user exists
+      prismaMock.user.findUnique.mockResolvedValueOnce({
+        id: 'user-email-match-id',
+      });
+
+      prismaMock.refreshToken.create.mockResolvedValue({ id: 'rt-id' });
+      jwtServiceMock.signAsync.mockResolvedValue('jwt_link_token');
+
+      const result = await service.googleLogin(
+        { idToken: 'valid_google_token' },
+        res,
+      );
+
+      expect(prismaMock.user.findUnique).toHaveBeenNthCalledWith(1, {
+        where: { googleId: 'google-sub-link' },
+        select: { id: true },
+      });
+
+      expect(prismaMock.user.findUnique).toHaveBeenNthCalledWith(2, {
+        where: { email: 'link.account@example.com' },
+        select: { id: true },
+      });
+
+      // Transação: atualiza usuário (grava googleId e passwordHash: null) e revoga todos os tokens
+      expect(prismaMock.$transaction).toHaveBeenCalledWith([
+        prismaMock.user.update({
+          where: { id: 'user-email-match-id' },
+          data: {
+            googleId: 'google-sub-link',
+            passwordHash: null,
+          },
+        }),
+        prismaMock.refreshToken.updateMany({
+          where: { userId: 'user-email-match-id' },
+          data: { isRevoked: true },
+        }),
+      ]);
+
+      expect(jwtServiceMock.signAsync).toHaveBeenCalledWith({
+        sub: 'user-email-match-id',
+      });
+      expect(mockRes.cookie).toHaveBeenCalled();
+      expect(result).toEqual({ accessToken: 'jwt_link_token' });
+    });
+
+    it('deve criar novo usuário com passwordHash null quando não achar por googleId nem por email', async () => {
+      const { res, mockRes } = createMockResponse();
+      mockVerifyIdToken.mockResolvedValue({
+        getPayload: () => ({
+          sub: 'google-sub-new',
+          email: 'new.google@example.com',
+          email_verified: true,
+          name: '<b>Brand</b> &amp; New',
+        }),
+      });
+
+      prismaMock.user.findUnique.mockResolvedValueOnce(null);
+      prismaMock.user.findUnique.mockResolvedValueOnce(null);
+      prismaMock.user.create.mockResolvedValue({
+        id: 'new-google-user-id',
+      });
+      prismaMock.refreshToken.create.mockResolvedValue({ id: 'rt-id' });
+      jwtServiceMock.signAsync.mockResolvedValue('jwt_new_google_token');
+
+      const result = await service.googleLogin(
+        { idToken: 'valid_google_token' },
+        res,
+      );
+
+      expect(prismaMock.user.create).toHaveBeenCalledWith({
+        data: {
+          name: 'Brand & New',
+          email: 'new.google@example.com',
+          googleId: 'google-sub-new',
+          passwordHash: null,
+        },
+        select: { id: true },
+      });
+
+      expect(jwtServiceMock.signAsync).toHaveBeenCalledWith({
+        sub: 'new-google-user-id',
+      });
+      expect(mockRes.cookie).toHaveBeenCalled();
+      expect(result).toEqual({ accessToken: 'jwt_new_google_token' });
+    });
+
+    it('deve usar a parte local do e-mail quando o nome sanitizado for vazio ou menor que 2 caracteres', async () => {
+      const { res } = createMockResponse();
+      mockVerifyIdToken.mockResolvedValue({
+        getPayload: () => ({
+          sub: 'google-sub-localname',
+          email: 'alice.wonder@example.com',
+          email_verified: true,
+          name: '<script></script>',
+        }),
+      });
+
+      prismaMock.user.findUnique.mockResolvedValueOnce(null);
+      prismaMock.user.findUnique.mockResolvedValueOnce(null);
+      prismaMock.user.create.mockResolvedValue({
+        id: 'alice-user-id',
+      });
+      prismaMock.refreshToken.create.mockResolvedValue({ id: 'rt-id' });
+      jwtServiceMock.signAsync.mockResolvedValue('jwt_alice_token');
+
+      await service.googleLogin({ idToken: 'valid_google_token' }, res);
+
+      expect(prismaMock.user.create).toHaveBeenCalledWith({
+        data: {
+          name: 'alice.wonder',
+          email: 'alice.wonder@example.com',
+          googleId: 'google-sub-localname',
+          passwordHash: null,
+        },
+        select: { id: true },
+      });
     });
   });
 });

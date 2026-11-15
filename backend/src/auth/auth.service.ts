@@ -9,10 +9,12 @@ import { Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 import type { CookieOptions, Response } from 'express';
+import { OAuth2Client, type TokenPayload } from 'google-auth-library';
 import sanitizeHtml from 'sanitize-html';
 import { PrismaService } from '../prisma/prisma.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
+import { GoogleLoginDto } from './dto/google-login.dto';
 
 export interface RegisterResponse {
   id: string;
@@ -30,11 +32,17 @@ const DUMMY_BCRYPT_HASH = bcrypt.hashSync('dummy-password', 12);
 
 @Injectable()
 export class AuthService {
+  private readonly googleClient: OAuth2Client;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
-  ) {}
+  ) {
+    this.googleClient = new OAuth2Client(
+      this.configService.get<string>('GOOGLE_CLIENT_ID'),
+    );
+  }
 
   async register(dto: RegisterDto): Promise<RegisterResponse> {
     const normalizedEmail = dto.email.trim().toLowerCase();
@@ -111,28 +119,7 @@ export class AuthService {
       throw new UnauthorizedException('Credenciais inválidas');
     }
 
-    // Gera refresh token aleatório, salva apenas seu hash SHA-256 e envia via cookie httpOnly
-    const rawRefreshToken = crypto.randomBytes(48).toString('base64url');
-    const hashedToken = crypto
-      .createHash('sha256')
-      .update(rawRefreshToken)
-      .digest('hex');
-
-    const expiresAt = this.getRefreshTokenExpiresAt();
-
-    await this.prisma.refreshToken.create({
-      data: {
-        userId: user.id,
-        hashedToken,
-        expiresAt,
-      },
-    });
-
-    this.setRefreshTokenCookie(res, rawRefreshToken);
-
-    const accessToken = await this.jwtService.signAsync({ sub: user.id });
-
-    return { accessToken };
+    return this.issueSessionTokens(user.id, res);
   }
 
   async refresh(
@@ -200,6 +187,146 @@ export class AuthService {
     const accessToken = await this.jwtService.signAsync({
       sub: tokenRecord.userId,
     });
+
+    return { accessToken };
+  }
+
+  async logout(
+    rawRefreshToken: string | undefined,
+    res: Response,
+  ): Promise<void> {
+    if (rawRefreshToken) {
+      const hashedToken = crypto
+        .createHash('sha256')
+        .update(rawRefreshToken)
+        .digest('hex');
+
+      await this.prisma.refreshToken.updateMany({
+        where: { hashedToken, isRevoked: false },
+        data: { isRevoked: true },
+      });
+    }
+
+    this.clearRefreshTokenCookie(res);
+  }
+
+  async googleLogin(
+    dto: GoogleLoginDto,
+    res: Response,
+  ): Promise<LoginResponse> {
+    const clientId = this.configService.get<string>('GOOGLE_CLIENT_ID');
+    let payload: TokenPayload | undefined;
+
+    try {
+      const ticket = await this.googleClient.verifyIdToken({
+        idToken: dto.idToken,
+        audience: clientId,
+      });
+      payload = ticket.getPayload();
+    } catch {
+      throw new UnauthorizedException('Credenciais inválidas');
+    }
+
+    if (
+      !payload ||
+      typeof payload.email !== 'string' ||
+      payload.email_verified !== true ||
+      typeof payload.sub !== 'string'
+    ) {
+      throw new UnauthorizedException('Credenciais inválidas');
+    }
+
+    const normalizedEmail = payload.email.trim().toLowerCase();
+    const googleId = payload.sub;
+
+    const rawName = typeof payload.name === 'string' ? payload.name : '';
+    let sanitizedName = sanitizeHtml(rawName.trim(), {
+      allowedTags: [],
+      allowedAttributes: {},
+    })
+      .replace(/&amp;/g, '&')
+      .trim();
+
+    if (sanitizedName.length < 2 || sanitizedName.length > 80) {
+      const localPart = normalizedEmail.split('@')[0] ?? 'User';
+      sanitizedName = localPart.slice(0, 80);
+      if (sanitizedName.length < 2) {
+        sanitizedName = 'User';
+      }
+    }
+
+    // 1. Achou usuário por googleId (payload.sub) → segue para emitir tokens.
+    const userByGoogleId = await this.prisma.user.findUnique({
+      where: { googleId },
+      select: { id: true },
+    });
+
+    if (userByGoogleId) {
+      return this.issueSessionTokens(userByGoogleId.id, res);
+    }
+
+    // 2. Senão, achou por e-mail → em $transaction: gravar googleId, zerar passwordHash (null)
+    // e revogar TODOS os refresh tokens desse usuário. Depois emitir tokens.
+    const userByEmail = await this.prisma.user.findUnique({
+      where: { email: normalizedEmail },
+      select: { id: true },
+    });
+
+    if (userByEmail) {
+      await this.prisma.$transaction([
+        this.prisma.user.update({
+          where: { id: userByEmail.id },
+          data: {
+            googleId,
+            passwordHash: null,
+          },
+        }),
+        this.prisma.refreshToken.updateMany({
+          where: { userId: userByEmail.id },
+          data: { isRevoked: true },
+        }),
+      ]);
+
+      return this.issueSessionTokens(userByEmail.id, res);
+    }
+
+    // 3. Senão → criar usuário (passwordHash null, googleId, name, email).
+    const newUser = await this.prisma.user.create({
+      data: {
+        name: sanitizedName,
+        email: normalizedEmail,
+        googleId,
+        passwordHash: null,
+      },
+      select: { id: true },
+    });
+
+    return this.issueSessionTokens(newUser.id, res);
+  }
+
+  private async issueSessionTokens(
+    userId: string,
+    res: Response,
+  ): Promise<LoginResponse> {
+    const rawRefreshToken = crypto.randomBytes(48).toString('base64url');
+    const hashedToken = crypto
+      .createHash('sha256')
+      .update(rawRefreshToken)
+      .digest('hex');
+
+    const expiresAt = this.getRefreshTokenExpiresAt();
+
+    await this.prisma.refreshToken.create({
+      data: {
+        userId,
+        hashedToken,
+        expiresAt,
+      },
+    });
+
+    this.setRefreshTokenCookie(res, rawRefreshToken);
+
+    const accessToken = await this.jwtService.signAsync({ sub: userId });
 
     return { accessToken };
   }

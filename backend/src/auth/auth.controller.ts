@@ -13,6 +13,7 @@ import type { Request, Response } from 'express';
 import { AuthService, LoginResponse, RegisterResponse } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
+import { GoogleLoginDto } from './dto/google-login.dto';
 
 @Controller('auth')
 export class AuthController {
@@ -45,5 +46,27 @@ export class AuthController {
     const rawRefreshToken = req.cookies?.['refresh_token'] as
       string | undefined;
     return this.authService.refresh(rawRefreshToken, res);
+  }
+
+  @Post('logout')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async logout(
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<void> {
+    const rawRefreshToken = req.cookies?.['refresh_token'] as
+      string | undefined;
+    await this.authService.logout(rawRefreshToken, res);
+  }
+
+  @Post('google')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async google(
+    @Body() dto: GoogleLoginDto,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<LoginResponse> {
+    return this.authService.googleLogin(dto, res);
   }
 }
